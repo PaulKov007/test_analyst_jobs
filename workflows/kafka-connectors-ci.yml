@@ -1,0 +1,175 @@
+name: deploy-kafka-connectors
+
+on:
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - 'ingest/**'
+  push:
+    branches: [ "master" ]
+    paths:
+      - 'ingest/**'
+
+
+env:
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+  VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+  DEPLOYER_PATH: deploy/kafka_connect
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  set-env-codes:
+    uses: sravni/core-dwh/.github/workflows/reuse-set-env-codes.yml@master
+    secrets: inherit
+
+  get-configs:
+    runs-on: [self-hosted, dwh]
+    outputs:
+      files: ${{ steps.changed-files.outputs.all_changed_files }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        sparse-checkout: |
+          ingest
+
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v44
+      with:
+        path: 'ingest'
+        diff_relative: false
+        json: true
+        escape_json: false
+        since_last_remote_commit: true
+        files: |
+            **.json
+
+  test:
+    needs: ["set-env-codes", "get-configs"]
+    if: (needs.get-configs.outputs.files != '[]') 
+    runs-on: [self-hosted, dwh]
+    env: 
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+    environment: ${{ needs.set-env-codes.outputs.env-code }}
+      
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+      
+    - name: Install pip dependencies
+      run: pip install -r ${{ env.DEPLOYER_PATH }}/requirements.txt 
+
+    - name: Test config - validate json
+      id: test-configs-valid-json
+      run: |
+        CONFIG_PATHS=$(echo '${{ needs.get-configs.outputs.files }}' | jq -r 'join(" ")')
+        echo "Running python script for paths: "
+        echo "$CONFIG_PATHS"
+        TEST_MODULE=deploy.kafka_connect.tests.0_validate_json
+        python3 -m "$TEST_MODULE" --config_paths $CONFIG_PATHS --env ${{ env.ENV_CODE }}
+      
+    - name: Fail fast if json test has failed
+      id: fail-if-json-invalid
+      if: steps.test-configs-valid-json.outputs.overall-result == 'False'
+      run: |
+        echo "JSON validation failed for one or more files"
+        exit 1
+
+    - name: Test config - validate connector
+      id: test-configs-valid-connector
+      run: |
+        CONFIG_PATHS=$(echo '${{ needs.get-configs.outputs.files }}' | jq -r 'join(" ")')
+        echo "Running python script for paths: "
+        echo "$CONFIG_PATHS"
+        TEST_MODULE=deploy.kafka_connect.tests.1_validate_connector
+        python3 -m "$TEST_MODULE" --config_paths $CONFIG_PATHS --env ${{ env.ENV_CODE }}
+
+    - name: Test config - validate sensitive values
+      id: test-configs-sensitive-values
+      run: |
+        CONFIG_PATHS=$(echo '${{ needs.get-configs.outputs.files }}' | jq -r 'join(" ")')
+        echo "Running python script for paths: "
+        echo "$CONFIG_PATHS"
+        TEST_MODULE=deploy.kafka_connect.tests.1_validate_connector
+        python3 -m "$TEST_MODULE" --config_paths $CONFIG_PATHS --env ${{ env.ENV_CODE }}
+
+    - name: Generate detailed test report
+      id: generate-report
+      if: always()
+      run: |
+        echo "### Summarized Test Report:" >> $GITHUB_STEP_SUMMARY
+        echo "##### 0. JSON Validation Test all passed" >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.test-configs-valid-json.outputs.overall-result }}" >> $GITHUB_STEP_SUMMARY
+        echo "##### 1. Connector Config Validation Test all passed" >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.test-configs-valid-connector.outputs.overall-result }}" >> $GITHUB_STEP_SUMMARY
+        echo "##### 2. Check Sensitive Values Test all passed" >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.test-configs-sensitive-values.outputs.overall-result }}" >> $GITHUB_STEP_SUMMARY
+        
+        echo >> $GITHUB_STEP_SUMMARY
+        echo "### Detailed Test Report:" >> $GITHUB_STEP_SUMMARY
+        echo "##### 0. JSON Validation Test" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo '${{ steps.test-configs-valid-json.outputs.detailed-results }}' | jq -r '.[] | "- \(.result): \(.path)"' >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "##### 1. Connector Config Validation Test" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo '${{ steps.test-configs-valid-connector.outputs.detailed-results }}' | jq -r '.[] | "- \(.result): \(.path)"' >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "##### 2. Check Sensitive Values Test" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo '${{ steps.test-configs-sensitive-values.outputs.detailed-results }}' | jq -r '.[] | "- \(.result): \(.path)"' >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+        echo >> $GITHUB_STEP_SUMMARY
+        echo "* Environment: ${{ env.ENV_CODE }}" >> $GITHUB_STEP_SUMMARY
+        echo "* Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+    - name: Fail if any test has failed
+      id: fail-wf-if-test-failed
+      if: >-
+        steps.test-configs-valid-json.outputs.overall-result == 'False' ||
+        steps.test-configs-valid-connector.outputs.overall-result == 'False' ||
+        steps.test-configs-sensitive-values.outputs.overall-result == 'False'
+      run: |
+        echo "At least one test has failed, check the configs and try again ;)"
+        exit 1
+
+  deploy:
+    needs: ["set-env-codes", "test", "get-configs"]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, dwh]
+    env: 
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+    environment: ${{ needs.set-env-codes.outputs.env-code }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+      
+    - name: Install pip dependencies
+      run: pip install -r ${{ env.DEPLOYER_PATH }}/requirements.txt 
+
+    - name: Deploy config (upsert)
+      id: deploy-configs
+      run: |
+        CONFIG_PATHS=$(echo '${{ needs.get-configs.outputs.files }}' | jq -r 'join(" ")')
+        echo "Running python script for paths: "
+        echo "$CONFIG_PATHS"
+        DEPLOY_MODULE=deploy.kafka_connect.deploy_connector
+        python3 -m "$DEPLOY_MODULE" --config_paths $CONFIG_PATHS --env ${{ env.ENV_CODE }}
+
+    - name: Create job summary
+      if: always()
+      run: |
+        echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo '${{ steps.deploy-configs.outputs.detailed-results }}' | jq -r '.[] | "- \(.result): \(.path)"' >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        
+        echo >> $GITHUB_STEP_SUMMARY
+        echo "* Environment: ${{ env.ENV_CODE }}" >> $GITHUB_STEP_SUMMARY
+        echo "* Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

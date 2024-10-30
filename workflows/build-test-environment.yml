@@ -1,0 +1,73 @@
+name: build test environment
+run-name: ${{ github.actor }} run build test environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      tgt_db_name:
+        description: Укажи окружение для наполнения
+        type: choice
+        required: true
+        options: 
+          - pavel
+          - dev
+          - andrey
+          - vasiliy
+          - ilsaf_k
+          - alex_r
+          - artem_s
+          - vlad_v
+          - xoxo
+          - valeryt
+          - kirill_s
+      include_tables:
+        description: Укажи через пробел таблицы для наполнения (в формате имя_схемы.имя_таблицы)
+        default: all
+        required: true
+        type: string
+      exclude_tables:
+        description: Укажи через пробел таблицы для исключения из алгоритма наполнения (в формате имя_схемы.имя_таблицы)
+        required: true
+        default: none
+        type: string
+
+env:
+  DEPLOYER_PATH: deploy/test_enviroments
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  PYTHONPATH: ${{ github.workspace }}
+  DB_NAME: dwh
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+  build-test-env:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    env: 
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+      VAULT_ENV: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    steps:
+      - name: Check Out Repo
+        uses: actions/checkout@v3
+      - name: Import dwh credentials from vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDRESS }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets: |
+              ${{ env.ENV_CODE }}/data/dwh host     | DB_HOST ;
+              ${{ env.ENV_CODE }}/data/dwh user     | DB_USER ;
+              ${{ env.ENV_CODE }}/data/dwh password | DB_PASSWORD ;
+              ${{ env.ENV_CODE }}/data/dwh port     | DB_PORT ;
+      - name: Install python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' 
+      - name: Install pip dependencies
+        run: python3.11 -m pip install -r ${{ env.DEPLOYER_PATH }}/requirements.txt
+      - name: Run test env builder
+        run: python3.11 ${{ env.DEPLOYER_PATH }}/transfer_db_data.py -tdb ${{ inputs.tgt_db_name }} -it ${{ inputs.include_tables }} -et ${{ inputs.exclude_tables }}

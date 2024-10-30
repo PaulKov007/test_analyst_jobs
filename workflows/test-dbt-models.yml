@@ -1,0 +1,151 @@
+name: test and run dbt models
+run-name: ${{ github.actor }} test and run dbt models
+
+on:
+  workflow_dispatch:
+    inputs:
+      dbt_models:
+        description: 'Dbt models to run. Space separated string'
+        required: true
+        default: ''
+        type: string
+  pull_request:
+    branches:
+      - 'develop'
+      - 'master'
+      - 'preprod'
+    paths:
+      - 'dwh_tool/mart/models/**/*.sql'
+      - 'dwh_tool/mart/ddl/**/*.sql'
+
+env:
+  DEPLOYER_PATH: deploy/test_dbt_models
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  PYTHONPATH: ${{ github.workspace }}
+  DBT_PROFILES_DIR: dwh_tool/mart/
+  DBT_PROJECT_DIR: dwh_tool/mart/
+  DBT_LOG_LEVEL: debug
+  DBT_LOG_FORMAT_FILE: text
+  DBT_LOG_LEVEL_FILE: debug
+  DBT_LOG_PATH: dwh_tool/mart/logs
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+
+  set-changed-files:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: [ self-hosted, dwh ]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        sparse-checkout: |
+          dwh_tool/mart
+
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v44
+      with:
+        files_yaml: |
+          dbt:
+            - dwh_tool/mart/models/**/*.sql
+            - dwh_tool/mart/ddl/**/*.sql
+
+    - name: Show changed files
+      env:
+        CHANGED_FILES: ${{ steps.changed-files.outputs.dbt_all_changed_files }}
+      run: |
+        for file in ${CHANGED_FILES}; do
+          echo "-----------------> Trackered $file"
+        done
+
+    outputs:
+      changed_files: ${{ steps.changed-files.outputs.dbt_all_changed_files }}
+
+  deploy-models:
+    if: always()
+    needs: [ "set-env-codes", "set-changed-files" ]
+    runs-on: [ self-hosted, dwh ]
+    
+    env:
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+      CHANGED_MODELS: ${{ needs.set-changed-files.outputs.changed_files }}
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Import dwh credentials from vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDRESS }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets: |
+            ${{ env.ENV_CODE }}/data/dwh host     | DB_HOST ;
+            ${{ env.ENV_CODE }}/data/dwh user     | DB_USER ;
+            ${{ env.ENV_CODE }}/data/dwh password | DB_PASSWORD ;
+            ${{ env.ENV_CODE }}/data/dwh port     | DB_PORT ;
+            ${{ env.ENV_CODE }}/data/dwh database | DB_NAME ;
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python3.11 -m pip install dbt-greenplum loguru==0.7.2
+          dbt deps
+
+      - name: Run models
+        id: run-models
+        run: |
+          python3.11 ${{ env.DEPLOYER_PATH }}/test_dbt_models.py -m run -s "${{ inputs.dbt_models }}"
+          
+      - name: Show run_messages.md
+        run: |
+          cat run_messages.md
+
+      - name: Set models to test
+        run: |
+          echo CHANGED_MODELS=$(cat success_models) > $GITHUB_ENV
+
+      - name: Test models
+        id: test-models
+        run: |
+          python3.11 ${{ env.DEPLOYER_PATH }}/test_dbt_models.py -m test -s '${{ env.CHANGED_MODELS }}'
+
+      - name: Show test_messages.md
+        run: |
+          cat test_messages.md
+
+      - name: Comment PR by RUN
+        if: github.event_name == 'pull_request' && always()
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          filePath: run_messages.md
+          comment_tag: run_comment
+          mode: recreate
+
+
+      - name: Comment PR by TEST
+        if: github.event_name == 'pull_request' && always()
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          filePath: test_messages.md
+          comment_tag: test_comment
+          mode: recreate
+
+      - name: Merge access
+        run: |
+          if [$(cat run_merge_acces) -eq 0] || [$(cat test_merge_acces) -eq 0]; then
+            echo 'Merge is allowed'
+            exit 1
+          fi

@@ -1,0 +1,10 @@
+hera[yaml]
+pre-commit
+PyYAML==6.0.1
+requests==2.31.0
+hvac==2.0.0
+pydantic==1.10.13
+hera==5.13.1
+SQLAlchemy==2.0.31
+loguru==0.7.2
+

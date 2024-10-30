@@ -1,0 +1,155 @@
+name: workflows ci
+run-name: ${{ github.actor }} run workflows ci
+name: workflows ci
+run-name: ${{ github.actor }} run workflows ci
+
+on:
+  # push:
+  #   branches: 
+  #     - "master"
+  #     - "pavel/**"
+  #     - "develop"
+  #     - "vasiliy/**"
+  #     - "ilsaf_k/**"
+  #     - "andrey/**"
+  #     - "vlad_v/**"
+  #     - "kirill_s/**"
+  #     - "artem_s/**"
+  #     - "alex_r/**"
+  #     - "nikt/**"
+  #     - "shustikov/**"
+  #     - "vindyukov/**"
+  #   paths:
+  #     - 'flow/**.py'
+  workflow_dispatch:
+    inputs:
+      flow:
+        description: 'Flow to deploy. Enter "all" to deploy all'
+        required: true
+        type: string
+      project:
+        description: 'Project for deploy to. Enter "all" to deploy for all'
+        required: true
+        default: 'core'
+        type: string
+
+env:
+  DEPLOYER_PATH: deploy/workflows
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  PYTHONPATH: ${{ github.workspace }}
+  FLOW: ${{ inputs.flow }}
+  PROJECT: ${{ inputs.project }}
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+  deploy-workflows:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    env:
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+      VAULT_ENV: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    steps:
+    - name: Check Out Repo
+      uses: actions/checkout@v3
+    - name: Import argo workflows credentials from vault
+      uses: hashicorp/vault-action@v3
+      with:
+        url: ${{ env.VAULT_ADDRESS }}
+        method: approle
+        roleId: ${{ secrets.VAULT_ROLE_ID }}
+        secretId: ${{ secrets.VAULT_SECRET_ID }}
+        secrets: |
+          ${{ env.ENV_CODE }}/data/argo-wf host | HOST ;
+          ${{ env.ENV_CODE }}/data/argo-wf-core service_account_name | SERVICE_ACCOUNT_NAME ;
+          ${{ env.ENV_CODE }}/data/argo-wf-core token | TOKEN ;
+          ${{ env.ENV_CODE }}/data/argo-wf-core namespace | NAMESPACE ;
+    - name: Install python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install pip dependencies
+      run: python3.11 -m pip install -r ${{ env.DEPLOYER_PATH }}/requirements.txt
+    - name: Run workflows deployer
+      env:
+        IMAGE_PATH: ${{ secrets.HARBOR_REGISTRY }}/dwh_prod/dwh_2/${{ vars.DWH_TOOL_IMAGE_NAME }}:${{ env.ENV_CODE }}
+        VAULT_WEBHOOK_ROLE_PATH: vault:secrets/data/infra-cluster/infra-services/prefect-agents#REPLICATOR_${{ env.VAULT_ENV }}_VAULT_ROLE_ID
+        VAULT_WEBHOOK_SECRET_PATH: vault:secrets/data/infra-cluster/infra-services/prefect-agents#REPLICATOR_${{ env.VAULT_ENV }}_VAULT_SECRET_ID
+      run: python3.11 ${{ env.DEPLOYER_PATH }}/workflow_deployer.py -e ${{ env.ENV_CODE }} -wf ${{ env.FLOW }} -p ${{ env.PROJECT }}
+on:
+  # push:
+  #   branches: 
+  #     - "master"
+  #     - "pavel/**"
+  #     - "develop"
+  #     - "vasiliy/**"
+  #     - "ilsaf_k/**"
+  #     - "andrey/**"
+  #     - "vlad_v/**"
+  #     - "kirill_s/**"
+  #     - "artem_s/**"
+  #     - "alex_r/**"
+  #     - "nikt/**"
+  #     - "shustikov/**"
+  #     - "vindyukov/**"
+  #   paths:
+  #     - 'flow/**.py'
+  workflow_dispatch:
+    inputs:
+      flow:
+        description: 'Flow to deploy. Enter "all" to deploy all'
+        required: true
+        type: string
+      project:
+        description: 'Project for deploy to. Enter "all" to deploy for all'
+        required: true
+        default: 'core'
+        type: string
+
+env:
+  DEPLOYER_PATH: deploy/workflows
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  PYTHONPATH: ${{ github.workspace }}
+  FLOW: ${{ inputs.flow }}
+  PROJECT: ${{ inputs.project }}
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+  deploy-workflows:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    env:
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+      VAULT_ENV: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    steps:
+    - name: Check Out Repo
+      uses: actions/checkout@v3
+    - name: Import argo workflows credentials from vault
+      uses: hashicorp/vault-action@v3
+      with:
+        url: ${{ env.VAULT_ADDRESS }}
+        method: approle
+        roleId: ${{ secrets.VAULT_ROLE_ID }}
+        secretId: ${{ secrets.VAULT_SECRET_ID }}
+        secrets: |
+          ${{ env.ENV_CODE }}/data/argo-wf host | HOST ;
+          ${{ env.ENV_CODE }}/data/argo-wf-${{ env.PROJECT }} service_account_name | SERVICE_ACCOUNT_NAME ;
+          ${{ env.ENV_CODE }}/data/argo-wf-${{ env.PROJECT }} token | TOKEN ;
+          ${{ env.ENV_CODE }}/data/argo-wf-${{ env.PROJECT }} namespace | NAMESPACE ;
+    - name: Install python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install pip dependencies
+      run: python3.11 -m pip install -r ${{ env.DEPLOYER_PATH }}/requirements.txt
+    - name: Run workflows deployer
+      env:
+        IMAGE_PATH: ${{ secrets.HARBOR_REGISTRY }}/dwh_prod/dwh_2/${{ vars.DWH_TOOL_IMAGE_NAME }}:${{ env.ENV_CODE }}
+        VAULT_WEBHOOK_ROLE_PATH: vault:secrets/data/infra-cluster/infra-services/prefect-agents#REPLICATOR_${{ env.VAULT_ENV }}_VAULT_ROLE_ID
+        VAULT_WEBHOOK_SECRET_PATH: vault:secrets/data/infra-cluster/infra-services/prefect-agents#REPLICATOR_${{ env.VAULT_ENV }}_VAULT_SECRET_ID
+      run: python3.11 ${{ env.DEPLOYER_PATH }}/workflow_deployer.py -e ${{ env.ENV_CODE }} -wf ${{ env.FLOW }} -p ${{ env.PROJECT }}

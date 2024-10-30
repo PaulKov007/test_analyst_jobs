@@ -1,0 +1,49 @@
+name: reuse-set-env-codes
+
+on:
+  workflow_call:
+    outputs:
+      env-code:
+        description: Current environment code
+        value: ${{ jobs.set-env-codes.outputs.env-code }}
+      branch-name:
+        description: Current branch name
+        value: ${{ jobs.set-env-codes.outputs.branch-name }}
+      vault-env-code:
+        description: Env code for vault secrets app role (DEV/PROD)
+        value: ${{ jobs.set-env-codes.outputs.vault-env-code }}
+
+jobs:
+  set-env-codes:
+    name: Set environment codes
+    runs-on: ubuntu-latest
+    outputs:
+      env-code: ${{ steps.set_env_codes.outputs.env_code }}
+      branch-name: ${{ steps.set_env_codes.outputs.branch_name }}
+      vault-env-code: ${{ steps.set_env_codes.outputs.vault_env }}
+    steps:
+      - name: Extract branch name
+        id: extract_branch_name
+        shell: bash
+        run: echo "BRANCH_NAME=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_ENV
+      - name: Set environment code
+        shell: bash
+        id: set_env_codes
+        run: |
+          # Получаем ENV
+          VAULT_ENV="DEV"
+          case $BRANCH_NAME in
+              master|main)
+                  ENV_CODE="prod"
+                  VAULT_ENV="PROD"
+                  ;;
+              develop)
+                  ENV_CODE="dev"
+                  ;;
+              *) 
+                  ENV_CODE=$(echo $BRANCH_NAME | awk -F "/" '{print $1}')
+                  ;;
+          esac
+          echo "env_code=$ENV_CODE" >> $GITHUB_OUTPUT
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "vault_env=$VAULT_ENV" >> $GITHUB_OUTPUT

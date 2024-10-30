@@ -1,0 +1,50 @@
+name: app docker image ci
+run-name: ${{ github.actor }} run app = "${{ inputs.app }}" docker image ci
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: 'App to deploy'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'App to deploy'
+        required: true
+        type: string
+
+env:
+  APPS_DIR: apps
+  
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+
+  build-and-publish:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    env: 
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    steps:
+      - name: Check Out Repo
+        uses: actions/checkout@v3
+      - name: Login to Harbor Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_LOGIN }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker build and push
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: ./${{ env.APPS_DIR }}/${{ inputs.app }}/docker/Dockerfile
+          push: true
+          tags: ${{ secrets.HARBOR_REGISTRY }}/dwh_prod/dwh_2/${{ inputs.app }}:${{ env.ENV_CODE }}

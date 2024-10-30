@@ -1,0 +1,193 @@
+name: run alembic for metadata/greenplum
+run-name: ${{ github.actor }} run migration for metadata/greenplum
+
+on:
+  workflow_dispatch:
+    inputs:
+      sql_files:
+        description: 'Названия файлов для миграции'
+        required: false
+        default: 'ALL'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'migrations/versions/metadata/**'
+      - 'migrations/versions/greenplum/**'
+  push:
+    branches:
+      - master
+    paths:
+      - 'migrations/versions/metadata/**'
+      - 'migrations/versions/greenplum/**'
+
+
+env:
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+  VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+
+  check_and_upgrade:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import dwh credentials from vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ vars.VAULT_ADDRESS }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets: |
+            ${{ env.ENV_CODE }}/data/core-dwh host     | DB_HOST ;
+            ${{ env.ENV_CODE }}/data/core-dwh user     | DB_USER ;
+            ${{ env.ENV_CODE }}/data/core-dwh password | DB_PASSWORD ;
+            ${{ env.ENV_CODE }}/data/core-dwh port     | DB_PORT ;
+            ${{ env.ENV_CODE }}/data/core-dwh database | DB_NAME ;
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip dependencies
+        run: |
+          python3.11 -m pip install --upgrade pip
+          python3.11 -m pip install -r dwh_tool/lib/alembic_requirements.txt
+
+      - name: Get the base commit of the branch
+        id: base_commit
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            BASE_COMMIT=$(git merge-base HEAD origin/master)
+          else
+            BASE_COMMIT=$(git rev-parse HEAD~1)
+          fi
+          echo "BASE_COMMIT=$BASE_COMMIT" >> $GITHUB_ENV 
+
+      - name: Check for changes in migrations folder
+        id: check_changes
+        run: |
+          CHANGES_METADATA=$(git diff --name-only ${{ env.BASE_COMMIT }} HEAD -- migrations/versions/metadata/)
+          CHANGES_GREENPLUM=$(git diff --name-only ${{ env.BASE_COMMIT }} HEAD -- migrations/versions/greenplum/)
+          
+          echo "CHANGES_METADATA=$CHANGES_METADATA"
+          echo "CHANGES_GREENPLUM=$CHANGES_GREENPLUM"
+
+          if [ -n "$CHANGES_METADATA" ]; then
+            echo "changes_metadata_found=true" >> $GITHUB_ENV
+          else
+            echo "changes_metadata_found=false" >> $GITHUB_ENV
+          fi
+          
+          if [ -n "$CHANGES_GREENPLUM" ]; then
+            echo "changes_greenplum_found=true" >> $GITHUB_ENV
+            # Избавляемся от длинных путей и убираем перенос строки (список измененных файлов)
+            FILES_GREENPLUM=$(echo "$CHANGES_GREENPLUM" | xargs -n 1 basename)
+            FILES_GREENPLUM_NO_SPACES=$(echo "$FILES_GREENPLUM" | tr '\n' ',' | sed 's/,$//')
+            echo "FILES_GREENPLUM_NO_SPACES=${FILES_GREENPLUM_NO_SPACES}" >> $GITHUB_ENV
+          else
+            echo "changes_greenplum_found=false" >> $GITHUB_ENV
+          fi
+
+      - name: Run Alembic Metadata Updater
+        run: |
+          if [ "${{ env.changes_metadata_found }}" = "true" ]; then
+              echo "Running upgrade"
+              alembic -c ./migrations/alembic.ini -n metadata -x ENV_CODE=${{ env.ENV_CODE }} -x DB_NAME=${{ env.DB_NAME }} upgrade head
+          fi
+          
+      - name: Run Alembic Greenplum Updater
+        if: always()
+        run: |
+          if [ "${{ env.changes_greenplum_found }}" = "true" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Running upgrade for Greenplum"
+
+            # При pull_request переменная sql_files автоматически не прокидываются
+            if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "push" ]; then
+              sql_files="ALL"
+            else
+              sql_files="${{ inputs.sql_files }}"
+            fi
+        
+            OUTPUT=$(alembic -c ./migrations/alembic.ini -n greenplum -x ENV_CODE=${{ needs.set-env-codes.outputs.env-code }} -x DB_NAME=${{ env.DB_NAME }} -x DB_SCHEMA=public -x SCRIPTS=${sql_files} upgrade head 2>&1) || {
+            LAST_FILE=$(echo "$OUTPUT" | awk '/Executing/ {last=$NF} END {print last}')
+            ERROR_MESSAGE=$(echo "$OUTPUT" | grep -E "psycopg2.errors.SyntaxError|LINE" | head -n 2 | tr '\n' ' ')
+        
+            echo "### ❌ Error during Greenplum upgrade" >> $GITHUB_STEP_SUMMARY
+            echo "| File Name | Error |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------------------------|--------------------------|" >> $GITHUB_STEP_SUMMARY
+            echo "| ${LAST_FILE} | ${ERROR_MESSAGE} |" >> $GITHUB_STEP_SUMMARY
+            echo "### ERROR ⬇️️" >> $GITHUB_STEP_SUMMARY
+            echo "OUTPUT=$OUTPUT" >> $GITHUB_STEP_SUMMARY
+            exit 1
+            }
+            echo "OUTPUT: $OUTPUT"
+            echo "Downgrade"
+            alembic -c ./migrations/alembic.ini -n greenplum -x ENV_CODE=${{ env.ENV_CODE }} -x DB_NAME=${{ env.DB_NAME }} -x DB_SCHEMA=public downgrade -1
+            echo "success=true" >> $GITHUB_ENV
+          else
+            echo "success=no_data" >> $GITHUB_ENV
+          fi
+
+      - name: Check branch name and push changes
+        if: github.event_name == 'push'
+        run: |
+          BRANCH_NAME=${{ github.head_ref }}
+          echo "Pushing changes to branch $BRANCH_NAME..."
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          git add migrations/versions/metadata/
+          git commit -m "Auto-generated alembic files pushed from GitHub Actions" || echo "No changes to commit"
+          git push origin $BRANCH_NAME
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub step summary
+        run: |
+          echo "## Migration Status" >> $GITHUB_STEP_SUMMARY
+          echo "env.success=${{ env.success  }}"
+          echo "FILES_GREENPLUM_NO_SPACES=${{ env.FILES_GREENPLUM_NO_SPACES }}"
+          
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "== 🚀 Manual launch 🚀 ==" >> $GITHUB_STEP_SUMMARY
+            echo "📁 All functions and views have been migrated successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            if [ "${{ env.success }}" = "true" ]; then
+              echo "✅ All migrations completed successfully" >> $GITHUB_STEP_SUMMARY
+            elif [ "${{ env.success }}" = "no_data" ]; then
+              echo "✅ There are no new files for updates" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Migration failed" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+          echo "### Summary of Changes for GreenPlum" >> $GITHUB_STEP_SUMMARY
+          echo "| New or modified files |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------------------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ -n $FILES_GREENPLUM_NO_SPACES ]]; then
+              IFS=',' read -ra FILES_ARRAY <<< "$FILES_GREENPLUM_NO_SPACES" # Преобразуем строку в массив
+              for file in "${FILES_ARRAY[@]}"; do
+                  echo "| ${file} |" >> $GITHUB_STEP_SUMMARY
+              done
+          else
+              echo "| None |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "### Current Datetime: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY

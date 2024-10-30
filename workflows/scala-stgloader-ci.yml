@@ -1,0 +1,73 @@
+name: scala stgloader ci
+run-name: ${{ github.actor }} run scala stgloader ci
+
+on:
+  push:
+    branches: [ "master" , "pavel/**", "develop", "maxim/**" , "vasiliy/**", "ilsaf_k/**", "andrey/**" ]
+    paths:
+      - 'consolidation/stg_loader/**'
+  workflow_dispatch:
+
+env:
+  REPO_SPARK_JOBS_PATH: target/scala-2.12/StgLoader-assembly-1.0.0.jar
+  VAULT_ADDRESS: ${{ vars.VAULT_ADDRESS }}
+  SBT_VERSION: 1.10.2
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: consolidation/stg_loader
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+  build:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    env: 
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+      S3_SPARK_JOBS_PATH: s3://dwh-yc-dwh-dataproc-core/spark_jobs/${{ needs.set-env-codes.outputs.env-code }}/
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    steps:
+      - name: Check Out Repo
+        uses: actions/checkout@v4
+      - name: Import object storage credentials from vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ env.VAULT_ADDRESS }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets: |
+              ${{ env.ENV_CODE }}/data/dproc-object-storage access_key | S3_ACCESS_KEY_ID ;
+              ${{ env.ENV_CODE }}/data/dproc-object-storage secret_key | S3_SECRET_ACCESS_KEY
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Install sbt
+        shell: bash
+        run: |
+          wget https://github.com/sbt/sbt/releases/download/v${{ env.SBT_VERSION }}/sbt-${{ env.SBT_VERSION }}.tgz
+          tar -xvzf sbt-${{ env.SBT_VERSION }}.tgz
+          sudo mv sbt /usr/local/sbt
+          echo '/usr/local/sbt/bin' >> $GITHUB_PATH
+      - name: Build uber jar
+        run: sbt assembly
+      - name: Install AWS Cli
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install --update
+      - name: Configure AWS Credentials
+        run: |
+             aws configure set aws_access_key_id ${{ env.S3_ACCESS_KEY_ID }} && \
+             aws configure set aws_secret_access_key ${{ env.S3_SECRET_ACCESS_KEY }} && \
+             aws configure set default.region ${{ vars.S3_REGION }}
+      - name: Upload spark jobs to object storage
+        run: |
+            aws --endpoint-url=${{ vars.S3_URL }} s3 cp ${{ env.REPO_SPARK_JOBS_PATH }} ${{ env.S3_SPARK_JOBS_PATH }}

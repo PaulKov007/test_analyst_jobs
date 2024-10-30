@@ -1,0 +1,55 @@
+name: dwh_tool docker image ci
+run-name: ${{ github.actor }} run dwh_tool docker image ci
+
+on:
+  push:
+    branches:
+    - "master"
+    - "pavel/**"
+    - "develop"
+    - "maxim/**"
+    - "vasiliy/**"
+    - "ilsaf_k/**"
+    - "andrey/**"
+    - "vlad_v/**"
+    - "kirill_s/**"
+    - "artem_s/**"
+    - "alex_r/**"
+    - "nikt/**"
+    - "shustikov/**"
+    - "vindyukov/**"
+    paths:
+    - 'dwh_tool/**'
+    - 'docker/argo_wf/**'
+  workflow_dispatch:
+
+jobs:
+  set-env-codes:
+    uses: ./.github/workflows/reuse-set-env-codes.yml
+    secrets: inherit
+  publish:
+    needs: ["set-env-codes"]
+    runs-on: [self-hosted, dwh]
+    env:
+      ENV_CODE: ${{ needs.set-env-codes.outputs.env-code }}
+    environment: ${{ needs.set-env-codes.outputs.vault-env-code }}
+    steps:
+    - name: Check Out Repo
+      uses: actions/checkout@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Login to Harbor Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ secrets.HARBOR_REGISTRY }}
+        username: ${{ secrets.HARBOR_LOGIN }}
+        password: ${{ secrets.HARBOR_PASSWORD }}
+    - name: Docker build and push
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./docker/argo_wf/Dockerfile
+        push: true
+        cache-from: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/dwh_prod/dwh_2/${{ vars.DWH_TOOL_IMAGE_NAME }}/cache:${{ env.ENV_CODE }}
+        cache-to: type=registry,ref=${{ secrets.HARBOR_REGISTRY }}/dwh_prod/dwh_2/${{ vars.DWH_TOOL_IMAGE_NAME }}/cache:${{ env.ENV_CODE }},mode=max,image-manifest=true
+        tags: ${{ secrets.HARBOR_REGISTRY }}/dwh_prod/dwh_2/${{ vars.DWH_TOOL_IMAGE_NAME }}:${{ env.ENV_CODE }}

@@ -1,0 +1,97 @@
+name: workflow apps docker image ci factory
+run-name: ${{ github.actor }} run workflow apps docker image ci factory
+
+on:
+  push:
+    branches:
+    - "master"
+    - "main"
+    paths:
+    - 'workflow_apps/**'
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: 'List of applications to deploy. Space separated string'
+        required: true
+        type: string
+
+env:
+  APPS_DIR: workflow_apps
+
+jobs:
+  set-changed-files:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        sparse-checkout: |
+          ${{ env.APPS_DIR }}
+
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v44
+      with:
+        files_yaml: |
+          apps:
+            - ${{ env.APPS_DIR }}/**
+
+    - name: Show changed files and dirs
+      id: set-changed-dirs
+      env:
+        CHANGED_FILES: ${{ steps.changed-files.outputs.apps_all_changed_files }}
+      run: "echo -e \"\\nChanged files: \"\nfor file in ${CHANGED_FILES}; do\n  echo \"------------> Trackered file: $file\"\ndone   \nchanged_files_list=$(echo \"${CHANGED_FILES}\" | tr ' ' '\\n')\nchanged_dirs=$(echo \"${changed_files_list}\" | grep -o '${{ env.APPS_DIR }}/[^/]*' | sort | uniq | sed 's/${{ env.APPS_DIR }}\\///' | tr '\\n' ' ')\n    #magic___^_^___line\necho -e \"\\nChanged dirs:\"\nfor dir in ${changed_dirs}; do\n  echo \"------------> Trackered dir: $dir\"\ndone\necho \"changed_dirs=$changed_dirs\" >> $GITHUB_OUTPUT\n    #magic___^_^___line\n"
+    outputs:
+      changed_dirs: ${{ steps.set-changed-dirs.outputs.changed_dirs }}
+
+  build-apps-dir-matrix:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: ["set-changed-files"]
+    env:
+      CHANGED_APPS: ${{ needs.set-changed-files.outputs.changed_dirs }}
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+    - name: Check Out Repo
+      uses: actions/checkout@v4
+
+    - name: Set Global App Directories into GLOBAL_APP_DIRS env
+      run: |
+        if [[ -n "${{ inputs.apps }}" ]]; then
+          echo "Using input value: ${{ inputs.apps }}"
+          GLOBAL_APP_DIRS="${{ inputs.apps }}"
+        else
+          echo "Using environment variable CHANGED_APPS: $CHANGED_APPS"
+          GLOBAL_APP_DIRS="$CHANGED_APPS"
+        fi
+        echo "GLOBAL_APP_DIRS=$GLOBAL_APP_DIRS" >> $GITHUB_ENV
+
+    - name: Validate GLOBAL_APP_DIRS
+      run: |
+        if [ -z "$GLOBAL_APP_DIRS" ]; then
+          echo "Error: Both inputs.apps and changed apps are empty. GLOBAL_APP_DIRS is empty."
+          exit 1
+        fi
+        echo "The global app directories are: $GLOBAL_APP_DIRS"
+
+    - name: Set Directories for Matrix
+      id: set-matrix
+      run: |
+        dirs_json=$(jq -n --arg dirs "$GLOBAL_APP_DIRS" '$dirs | split(" ") | map(select(length > 0)) | tojson')
+        echo "Matrix directories: $dirs_json"
+        echo "matrix=$dirs_json" >> $GITHUB_OUTPUT
+
+  run-apps-docker-images-ci:
+    if: always()
+    needs: ["set-changed-files", "build-apps-dir-matrix"]
+    strategy:
+      matrix:
+        app-dir: ${{ fromJson(fromJson(needs.build-apps-dir-matrix.outputs.matrix)) }}
+    uses: ./.github/workflows/argo-wf-apps-docker-image-ci.yml
+    secrets: inherit
+    with:
+      app: ${{ matrix.app-dir }}
